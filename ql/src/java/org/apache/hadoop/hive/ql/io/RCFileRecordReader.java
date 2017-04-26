@@ -51,6 +51,7 @@ public class RCFileRecordReader<K extends LongWritable, V extends BytesRefArrayW
   protected Configuration conf;
   private final FileSplit split;
   private final boolean useCache;
+  private final boolean isEmptyInput;
 
   private static RCFileSyncCache syncCache = new RCFileSyncCache();
 
@@ -95,27 +96,36 @@ public class RCFileRecordReader<K extends LongWritable, V extends BytesRefArrayW
   public RCFileRecordReader(Configuration conf, FileSplit split)
       throws IOException {
 
-    Path path = split.getPath();
-    FileSystem fs = path.getFileSystem(conf);
-    this.in = new RCFile.Reader(fs, path, conf);
-    this.end = split.getStart() + split.getLength();
     this.conf = conf;
     this.split = split;
 
-    useCache = HiveConf.getBoolVar(conf, HiveConf.ConfVars.HIVEUSERCFILESYNCCACHE);
+    if (split.getLength() == 0) {
+      this.in = null;
+      this.end = 0;
+      this.start = 0;
+      this.more = false;
+      this.isEmptyInput = true;
+      this.useCache = false;
+    } else {
+      Path path = split.getPath();
+      FileSystem fs = path.getFileSystem(conf);
+      this.in = new RCFile.Reader(fs, path, conf);
+      this.end = split.getStart() + split.getLength();
 
-    if (split.getStart() > in.getPosition()) {
-      long oldSync = useCache ? syncCache.get(split) : -1;
-      if(oldSync == -1) {
-        in.sync(split.getStart()); // sync to start
-      } else {
-        in.seek(oldSync);
+      useCache = HiveConf.getBoolVar(conf, HiveConf.ConfVars.HIVEUSERCFILESYNCCACHE);
+
+      if (split.getStart() > in.getPosition()) {
+        long oldSync = useCache ? syncCache.get(split) : -1;
+        if (oldSync == -1) {
+          in.sync(split.getStart()); // sync to start
+        } else {
+          in.seek(oldSync);
+        }
       }
+      this.start = in.getPosition();
+      this.isEmptyInput = false;
+      more = start < end;
     }
-
-    this.start = in.getPosition();
-
-    more = start < end;
   }
 
   public Class<?> getKeyClass() {
@@ -136,12 +146,15 @@ public class RCFileRecordReader<K extends LongWritable, V extends BytesRefArrayW
   }
 
   public boolean nextBlock() throws IOException {
-    return in.nextBlock();
+    return (isEmptyInput)? false : in.nextBlock();
   }
 
   @Override
   public boolean next(LongWritable key, BytesRefArrayWritable value)
       throws IOException {
+    if(isEmptyInput) {
+      return false;
+    }
 
     more = next(key);
 
@@ -152,6 +165,10 @@ public class RCFileRecordReader<K extends LongWritable, V extends BytesRefArrayW
   }
 
   protected boolean next(LongWritable key) throws IOException {
+    if(isEmptyInput) {
+      return false;
+    }
+
     if (!more) {
       return false;
     }
@@ -184,23 +201,29 @@ public class RCFileRecordReader<K extends LongWritable, V extends BytesRefArrayW
   }
 
   public long getPos() throws IOException {
-    return in.getPosition();
+    return isEmptyInput? 0L : in.getPosition();
   }
 
   public KeyBuffer getKeyBuffer() {
-    return in.getCurrentKeyBufferObj();
+    return isEmptyInput? null : in.getCurrentKeyBufferObj();
   }
 
   protected void seek(long pos) throws IOException {
-    in.seek(pos);
+    if (!isEmptyInput) {
+      in.seek(pos);
+    }
   }
 
   public void sync(long pos) throws IOException {
-    in.sync(pos);
+    if (!isEmptyInput) {
+      in.sync(pos);
+    }
   }
 
   public void resetBuffer() {
-    in.resetBuffer();
+    if (!isEmptyInput) {
+      in.resetBuffer();
+    }
   }
 
   public long getStart() {
@@ -208,6 +231,8 @@ public class RCFileRecordReader<K extends LongWritable, V extends BytesRefArrayW
   }
 
   public void close() throws IOException {
-    in.close();
+    if (!isEmptyInput) {
+      in.close();
+    }
   }
 }
